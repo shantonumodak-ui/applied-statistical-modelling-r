@@ -1,0 +1,31 @@
+# ---- R ----
+.Rhistory
+.Rapp.history
+.RData
+.Rproj.user/
+*.Rproj
+.Ruserdata
+.Renviron
+
+# ---- Knitted output (regenerate with rmarkdown::render) ----
+reports/
+*_files/
+*_cache/
+*.html
+*.pdf
+!figures/*.pdf
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+*~
+
+# ---- Large / derived data ----
+*.zip
+*.rds

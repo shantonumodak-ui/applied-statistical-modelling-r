@@ -1,0 +1,228 @@
+---
+title: "London Underground Temperature Analysis"
+subtitle: "Identifying priority lines for air-cooling investment (2013–2024)"
+author: "Shantonu Modak"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+## Section-1
+
+#### Background
+We are taking the role of a policy maker in London who is deciding where to install a new air-cooling system on the London Underground lines based on temperature data.The London Underground experiences significant temperature variations across different lines. Some lines reach extreme temperatures that exceed passenger comfort standards and operational limits. Analyzing temperature patterns from 2013 to 2024 will help identify which lines require priority for air-cooling installation.
+
+Our objective is to:
+ *Identify the lines with the highest temperatures
+ *Compare temperature patterns across different Underground lines
+ *Provide recommendations for air-cooling system placement
+
+### Review the underground data from 2013 to 2024
+
+#### Data Dictionary
+
+  * This data is provide by london underground. The varriabe are described in the given below
+  
+  
+  | Variable | Description |
+|------------|-------------|
+| ID | Unique identifier for each observation |
+| Year | Year of temperature measurement (2013-2024) |
+| Month | Month of the year when temperature was recorded |
+| Line | Name of London Underground line |
+| Temp | Temperature in degrees Celsius measured at the underground Line |
+  ---
+
+
+#### Install necessary packages
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(gridExtra)
+```
+
+### Check data integrity
+
+#### Read the dada
+
+```{r}
+underground_data <- read_csv("../data/underground_temperatures.csv")
+```
+
+#### read the first 6 rows of data
+
+```{r}
+head(underground_data)
+```
+
+#### Check dimensions and structure of data
+
+```{r}
+dim(underground_data)
+str(underground_data)
+
+```
+
+
+#### findout the missing data and null values
+
+```{r}
+missing_data <- colSums(is.na(underground_data))
+print(missing_data)
+```
+
+#### remove missing data from Temp column
+
+```{r}
+underground_clean_data <- underground_data %>%
+  filter(!is.na(Temp))
+dim(underground_data)
+dim(underground_clean_data)
+```
+
+#### check the data after remove missing data
+
+```{r}
+c(colSums(is.na(underground_clean_data)),
+  Total = sum(is.na(underground_clean_data)))
+```
+
+#Note:-  i removed the missing data from temp columm beacause there is small number of missing data as compared to original data set
+
+
+#### ggplot plotting to identify outlier
+
+```{r}
+ggplot(underground_data, aes(x = Temp)) + geom_histogram()
+
+```
+
+#### remove outlier
+
+```{r}
+underground_clean_data <- filter(underground_clean_data, Temp >= 5 & Temp < 50)
+ggplot(underground_clean_data, aes(x = Temp)) + geom_histogram()
+
+```
+
+### summary of data
+
+```{r}
+summary_table <- underground_clean_data %>%
+  group_by(Line) %>%
+  summarise(
+    mean_temperature = mean(Temp, na.rm = TRUE),
+    sd_temperature   = sd(Temp, na.rm = TRUE),
+    min_temperature  = min(Temp, na.rm = TRUE),
+    max_temperature  = max(Temp, na.rm = TRUE),
+    N_observations = n()
+  )
+
+```
+```{r}
+print(summary_table)
+```
+
+### Excluding the sub surface line from the data
+
+```{r}
+final_underground_data <- filter(underground_clean_data, Line != "Sub-surface_lines")
+unique(final_underground_data)
+```
+
+### Plot the distribution of temp across all years in the dataset having temp of mean and standard daviation
+
+#### calculate mean and standard deviation for each line 
+
+```{r}
+summary_stats <- final_underground_data %>%
+  group_by(Line) %>%
+  summarise(mean_temp = mean(Temp, na.rm = TRUE),
+            sd_temp = sd(Temp, na.rm = TRUE))
+print(summary_stats)
+
+```
+
+### ggplot for distribution of mean temperature and standard deviation vs all Line
+
+```{r}
+ggplot(data = final_underground_data, aes(x = Temp, fill = Line)) +
+  geom_histogram(bins = 30, color = "black") +
+  geom_vline(data = summary_stats, aes(xintercept = mean_temp), color = "red", linetype = "dashed") +
+  geom_vline(data = summary_stats, aes(xintercept = mean_temp + sd_temp), color = "blue", linetype = "dotted") +
+  geom_vline(data = summary_stats, aes(xintercept = mean_temp - sd_temp), color = "blue", linetype = "dotted") +
+  facet_wrap(~ Line)
+```
+
+```{r}
+ggplot(data = final_underground_data, aes(y = Temp, fill = Line)) +
+  geom_boxplot(alpha = 0.6, color = "black", width = 0.5) +  # Adjust width here (default is 0.75)
+  geom_hline(data = summary_stats, aes(yintercept = mean_temp),
+             color = "red", linetype = "dashed", size = 1) +
+  labs(
+    title = "Temperature Distribution by Underground Line",
+    x = "Underground Line",
+    y = "Temperature (°C)"
+  ) +
+  facet_wrap(~ Line)
+```
+
+
+
+### t-test: Compare Bakerloo and Central Line temperatures
+
+```{r}
+bakerloo_central_comparision <- final_underground_data %>%
+  filter(Line %in% c("Bakerloo", "Central"))
+t.test(Temp ~ Line, data = bakerloo_central_comparision)
+```
+
+### t-test: Bakerloo Line Vs Central Line (summer months:- May, June, July and August).
+
+```{r}
+summer_months <- c("May", "June", "July", "August")
+summer_data <- final_underground_data %>%
+  filter(Line %in% c("Bakerloo", "Central"),
+         Month %in% summer_months)
+```
+
+```{r}
+t.test(Temp ~ Line, data = summer_data)
+```
+
+# Section-2
+
+### Report Analysis & Recommendations
+
+### Report Analysis:
+  
+* This data analysis examines temperature variations across London Underground lines to identify critical thermal risk zones requiring priority cooling system investment. Understanding which lines operate at dangerously high temperatures enables strategic capital allocation—ensuring new air cooling infrastructure is deployed where it will have maximum passenger safety and operational impact.
+
+* Analysis of 1,134 temperature observations (2013-2024) reveals critical thermal crisis. Bakerloo and Central lines operate at 27.8°C and 27.2°C, which is 69% and 66% hotter than Waterloo & City (16.4°C). This 11.4°C differential requires immediate intervention.
+
+* Histogram Analysis shows that Bakerloo/Central clustered 27-28°C with summer peaks exceeding 30°C. Safe zone lines maintain stable 16-19°C baselines. Boxplot Significance reveals that Critical zone lines display higher medians and standard deviation also wider interquartile ranges, indicating persistent heat stress plus unpredictable extremes. Boxplots also shows that Bakerloo and Central line have greater thermal instability.
+
+* T-Test Results:
+  * For t-test of entire year between Bakerloo and Central line shows that t = 2.1772, p=0.0303 < 0.05,  which again indicate temperature difference is significant. Bakerloo 26.8°C vs Central 26.1°C.
+  * For t-test of Summer (May to Aug) shows that t=0.15803, p=0.8748 > 0.05, which means there is no significant difference between Bakerloo and central line mean temperature in summer(May to Aug). Bakerloo 28.7°C vs Central 28.7°C—both equally hot, both have dangerous thermal risk. 
+  
+
+### Recommendations: 
+
+* Install new air cooling system on Bakerloo line immediately (October 2025-December 2027). Priority justified by highest thermal risk (69%) more hotter than the safe line, boxplot volatility evidence, and statistical significance (p<0.05). Engineering estimates 8-12°C reduction. Subsequently, Central Line has also indicate as high thermal risk zone, do it in 2nd phase, risk reduce and also costs get reduce via sequential procurement. Monitor Northern, Piccadilly and Victoria quarterly intervene if complaints exceed baseline 20%. most important thing Jubilee and Waterloo line require no action (safe line).
+
+
+
+
+

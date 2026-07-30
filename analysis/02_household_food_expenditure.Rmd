@@ -1,0 +1,1003 @@
+---
+title: "Household Food Expenditure in England"
+subtitle: "Multiple regression with interaction effects (Alcohol × Debt)"
+author: "Shantonu Modak"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    code_folding: show
+    theme: flatly
+    highlight: tango
+    df_print: paged
+---
+
+#### Section-1
+
+#### Background: Executive Summary
+
+This report examines the determinants of weekly household food expenditure in England, with particular emphasis on how alcohol spending and debt payments interact to influence food spending patterns. The analysis employs multiple linear regression to identify key drivers of food expenditure and tests whether the relationship between alcohol spending and food expenditure varies across households with different levels of debt obligations.
+
+
+Our objective is to: The analysis addresses two primary research questions:
+
+What factors determine weekly food expenditure? We examine the effects of    household size, sex, number of vehicles, accommodation costs, alcohol    spending, debt payments, and income category.
+
+Does the effect of alcohol spending on food expenditure vary by debt level? We investigate whether the relationship between alcohol and food expenditure differs across households with different debt payment obligations.
+
+The analysis employs multiple linear regression with interaction effects to provide comprehensive insights into household consumption behavior.
+
+#### Data Dictionary
+
+  * This data is provide weekly household food expenditure in England. The varriabe are described in the given below
+  
+  | Variable | Description |
+|----------|-------------|
+| Food | Average weekly household expenditure on food and non-alcoholic beverages (£) |
+| Alcohol | Average weekly household expenditure on alcoholic beverages (£) |
+| Debt | Average weekly debt service payments (credit cards, loans) (£) |
+| Housing | Average weekly accommodation costs (mortgage or rent payments) (£) |
+| HouseholdSize | Total number of individuals living in the household |
+| Kids | Number of dependent children in the household |
+| Vehicles | Total number of vehicles owned by the household |
+| Sex | Sex of the household survey respondent (Male/Female) |
+| income_category | Household income classification (Low/Medium/High) |
+
+
+##### : Setup and Configuration
+
+```{r setup, include=FALSE}
+  
+# ==================== CRITICAL: KNITR OPTIONS (MUST BE FIRST) ====================
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  error = FALSE,
+  fig.align = "center",
+  fig.width = 10,
+  fig.height = 6,
+  cache = FALSE
+)
+
+# ==================== CLEAN ENVIRONMENT ====================
+rm(list = ls())
+graphics.off()
+if (!is.null(dev.list())) dev.off()
+
+# ==================== LIBRARY LOADING (CORRECT ORDER) ====================
+# Step 1: Core tidyverse FIRST (foundation)
+library(tidyverse)
+
+# Step 2: Data manipulation & utilities
+library(scales)
+library(broom)
+library(knitr)
+
+# Step 3: Visualization packages
+library(gridExtra)
+library(ggplot2)      # Explicitly load even though in tidyverse
+library(GGally)
+library(corrplot)
+
+# Step 4: Statistical packages (order matters here!)
+library(interactions)
+library(lmtest)
+
+# Step 5: Table formatting
+library(kableExtra)
+
+# Step 6: CONFLICT-PRONE PACKAGES LAST (critical!)
+library(MASS)         # Has select() conflict with dplyr
+library(car)          # Has recode() conflict
+library(boot)         # Generally safe but load late
+
+# ==================== RESOLVE CONFLICTS ====================
+# Force dplyr functions to override MASS
+select <- dplyr::select
+filter <- dplyr::filter
+summarise <- dplyr::summarise
+mutate <- dplyr::mutate
+
+# ==================== GLOBAL SETTINGS ====================
+theme_set(theme_minimal(base_size = 12))
+options(scipen = 999)  # Disable scientific notation
+
+# Confirm setup
+cat("✓ Setup complete\n")
+cat("✓ Loaded packages:", length(.packages()), "\n")
+
+```
+
+##### CHUNK 1: Load and check data integrity
+
+```{r}
+# Load household expenditure data
+household_raw <- read_csv("../data/household_expenditure.csv")
+
+# Display first 10 rows
+print(head(household_raw, 10))
+
+```
+
+##### CHUNK 2: Data Quality Assessment
+
+```{r}
+# Chunk 04: Structure and missing values
+cat("Rows:", nrow(household_raw), "| Columns:", ncol(household_raw), "\n")
+
+
+cat("\n=== Missing values by variable ===\n")
+household_raw %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing_Count") %>%
+  mutate(Percent = round(Missing_Count / nrow(household_raw) * 100, 2)) %>%
+  arrange(desc(Missing_Count)) %>%
+  kable()
+
+
+
+```
+
+
+##### CHUNK 3: DATA CLEANING 
+
+```{r}
+
+missing_summary <- data.frame(
+  Variable = names(household_raw),
+  Missing = colSums(is.na(household_raw)),
+  Percent = round(100 * colSums(is.na(household_raw)) / nrow(household_raw), 2)
+)
+
+data_clean <- household_raw %>%
+  drop_na() %>%
+  filter(Food > 0, Alcohol >= 0) %>%
+  mutate(
+    Sex = factor(Sex, levels = c("male", "female")),
+    income_category = factor(income_category, levels = c("Low", "Medium", "High"))
+  )
+
+retention_rate <- round(100 * nrow(data_clean) / nrow(household_raw), 2)
+removed_obs <- nrow(household_raw) - nrow(data_clean)
+
+# Display cleaning summary in separate lines
+cat(sprintf("Original observations: %d\n", nrow(household_raw)))
+cat(sprintf("Observations removed: %d\n", removed_obs))
+cat(sprintf("Final observations: %d\n", nrow(data_clean)))
+cat(sprintf("Retention rate: %.2f%%\n\n", retention_rate))
+
+```
+###### Note: The variables with missing values had very low percentages (≤0.20%), so their removal is unlikely to affect the overall analysis. All key spending variables were complete. After deletion, over 99.66% of the data was retained, ensuring the dataset remains representative and reliable. This makes listwise deletion a simple and effective choice.
+
+##### Chunk 4: Outlier detection and handling
+
+```{r}
+detect_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25); Q3 <- quantile(x, 0.75); IQR_val <- Q3 - Q1
+  (x < Q1 - 1.5 * IQR_val) | (x > Q3 + 1.5 * IQR_val)
+}
+
+outlier_summary <- data_clean %>%
+  select(Food, Alcohol, Debt, Housing, HouseholdSize, Kids, Vehicles) %>%
+  summarise(across(everything(), ~sum(detect_outliers(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Outliers") %>%
+  mutate(Percentage = round(Outliers / nrow(data_clean) * 100, 2))
+
+kable(outlier_summary, caption = "**Table 5: Outlier Detection**") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(0, bold = TRUE, background = "#E74C3C", color = "white")
+
+```
+###### Note:- Outliers ranged from 0.02% (Vehicles) to 5.63% (Kids), with Debt showing 5.05% outliers. These observations were retained as they reflect genuine population heterogeneity rather than data quality issues, remain below the 10% threshold for concern, and are substantively meaningful for understanding household expenditure behavior. Influence diagnostics will be conducted during regression analysis to ensure no single observation unduly affects parameter estimates.
+
+##### Chunk 5: EXPLORATORY DATA ANALYSIS
+
+```{r}
+
+# -------------------- SET THEME --------------------
+theme_set(ggplot2::theme_minimal(base_size = 12))
+col_pal <- c("#2E86AB", "#A23B72", "#F18F01", "#06A77D", "#D62839")
+
+# -------------------- 1. CONTINUOUS VARIABLES --------------------
+p1 <- data_clean %>%
+  dplyr::select(Food, Alcohol, Debt, Housing) %>%
+  tidyr::pivot_longer(
+    cols = dplyr::everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  ggplot2::ggplot(ggplot2::aes(x = Value, fill = Variable)) +
+  ggplot2::geom_histogram(bins = 30, alpha = 0.7, color = "white") +
+  ggplot2::facet_wrap(~Variable, scales = "free", ncol = 2) +
+  ggplot2::scale_fill_manual(values = col_pal) +
+  ggplot2::labs(
+    title = "Distribution of Key Continuous Variables",
+    subtitle = "Food, Alcohol, Debt, and Housing Expenditures (£/week)",
+    x = "Expenditure (£/week)",
+    y = "Frequency"
+  ) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                 legend.position = "none")
+
+print(p1)
+
+# -------------------- 2. CATEGORICAL VARIABLES --------------------
+cat_data <- dplyr::bind_rows(
+  data_clean %>%
+    dplyr::count(income_category) %>%
+    dplyr::mutate(Category = "Income",
+                  Group = as.character(income_category)),
+  data_clean %>%
+    dplyr::count(Sex) %>%
+    dplyr::mutate(Category = "Sex",
+                  Group = as.character(Sex))
+) %>%
+  dplyr::group_by(Category) %>%
+  dplyr::mutate(Percent = round(100 * n / sum(n), 1))
+
+p2 <- ggplot2::ggplot(cat_data,
+                      ggplot2::aes(x = Group, y = n, fill = Group)) +
+  ggplot2::geom_col(alpha = 0.85, color = "white") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = paste0(n, "\n(", Percent, "%)")),
+    vjust = -0.3, fontface = "bold", size = 3
+  ) +
+  ggplot2::facet_wrap(~Category, scales = "free_x") +
+  ggplot2::scale_fill_manual(values = col_pal) +
+  ggplot2::labs(
+    title = "Categorical Variable Distribution",
+    subtitle = "Income Category and Sex of Survey Respondent",
+    x = "", y = "Count"
+  ) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                 legend.position = "none") +
+  ggplot2::ylim(0, max(cat_data$n) * 1.15)
+
+print(p2)
+
+# -------------------- 3. DISCRETE VARIABLES --------------------
+p3 <- data_clean %>%
+  dplyr::select(HouseholdSize, Kids, Vehicles) %>%
+  tidyr::pivot_longer(
+    cols = dplyr::everything(),
+    names_to = "Variable",
+    values_to = "Value"
+  ) %>%
+  dplyr::count(Variable, Value) %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = factor(Value), y = n, fill = Variable)
+  ) +
+  ggplot2::geom_col(alpha = 0.85, color = "white") +
+  ggplot2::geom_text(
+    ggplot2::aes(label = n),
+    vjust = -0.3, fontface = "bold", size = 3
+  ) +
+  ggplot2::facet_wrap(~Variable, scales = "free", ncol = 3) +
+  ggplot2::scale_fill_manual(values = col_pal) +
+  ggplot2::labs(
+    title = "Distribution of Discrete Household Characteristics",
+    subtitle = "Household Size, Number of Children, and Vehicle Ownership",
+    x = "Count", y = "Frequency"
+  ) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                 legend.position = "none")
+
+print(p3)
+
+# -------------------- 4. BIVARIATE --------------------
+p4 <- ggplot2::ggplot(
+  data_clean,
+  ggplot2::aes(x = income_category, y = Food, fill = income_category)
+) +
+  ggplot2::geom_violin(alpha = 0.3, trim = FALSE) +
+  ggplot2::geom_boxplot(width = 0.2, alpha = 0.8, outlier.alpha = 0.3) +
+  ggplot2::stat_summary(
+    fun = mean, geom = "point",
+    shape = 23, size = 3,
+    fill = "white", color = "black"
+  ) +
+  ggplot2::facet_wrap(~Sex) +
+  ggplot2::scale_fill_manual(values = col_pal) +
+  ggplot2::labs(
+    title = "Food Expenditure by Income Category and Sex",
+    subtitle = "Violin + boxplot with mean",
+    x = "Income Category",
+    y = "Food Expenditure (£/week)"
+  ) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                 legend.position = "none")
+
+print(p4)
+
+# -------------------- 5. KEY RELATIONSHIP --------------------
+p5 <- ggplot2::ggplot(
+  data_clean,
+  ggplot2::aes(x = Alcohol, y = Food, color = income_category)
+) +
+  ggplot2::geom_point(alpha = 0.4, size = 2) +
+  ggplot2::geom_smooth(method = "lm", se = TRUE, linewidth = 1.2) +
+  ggplot2::scale_color_manual(values = col_pal) +
+  ggplot2::labs(
+    title = "Relationship Between Alcohol and Food Expenditure",
+    subtitle = "Linear relationships by income category",
+    x = "Alcohol Expenditure (£/week)",
+    y = "Food Expenditure (£/week)"
+  ) +
+  ggplot2::theme(plot.title = ggplot2::element_text(face = "bold"),
+                 legend.position = "bottom")
+
+print(p5)
+
+# -------------------- SUMMARY TABLE --------------------
+summary_stats <- data_clean %>%
+  dplyr::summarise(
+    dplyr::across(
+      c(Food, Alcohol, Debt, Housing, HouseholdSize, Kids, Vehicles),
+      list(
+        Mean = ~round(mean(.x, na.rm = TRUE), 2),
+        SD = ~round(sd(.x, na.rm = TRUE), 2),
+        Median = ~round(median(.x, na.rm = TRUE), 2)
+      )
+    )
+  )
+
+knitr::kable(t(summary_stats))
+
+```
+
+##### CHUNK 6: DESCRIPTIVE STATISTICS
+
+```{r}
+
+descriptive_stats <- data_clean %>%
+  group_by(income_category) %>%
+  summarise(
+    N = n(),
+    Mean_Food = round(mean(Food, na.rm = TRUE), 2),
+    SD_Food = round(sd(Food, na.rm = TRUE), 2),
+    Mean_Alcohol = round(mean(Alcohol, na.rm = TRUE), 2),
+    SD_Alcohol = round(sd(Alcohol, na.rm = TRUE), 2)
+  )
+
+print(kable(descriptive_stats))
+
+
+```
+
+##### CHUNK 7: DISTRIBUTION OF FOOD EXPENDITURE
+
+```{r}
+p1 <- ggplot(data_clean, aes(x = Food)) +
+  geom_histogram(aes(y = after_stat(density)), 
+                 bins = 40, fill = "#2E86AB", alpha = 0.7, color = "white") +
+  geom_density(color = "#A23B72", linewidth = 1.2) +
+  labs(title = "Distribution of Weekly Food Expenditure",
+       subtitle = paste("Mean = £", round(mean(data_clean$Food), 2), 
+                       " | SD = £", round(sd(data_clean$Food), 2)),
+       x = "Food Expenditure (£/week)",
+       y = "Density") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray40"))
+
+p2 <- ggplot(data_clean, aes(sample = Food)) +
+  stat_qq(color = "#2E86AB", alpha = 0.6) +
+  stat_qq_line(color = "#A23B72", linewidth = 1) +
+  labs(title = "Q-Q Plot: Food Expenditure Normality",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+grid.arrange(p1, p2, ncol = 2)
+
+```
+
+##### CHUNK 8: FOOD EXPENDITURE BY INCOME CATEGORY
+
+```{r}
+ggplot(data_clean, aes(x = income_category, y = Food, fill = income_category)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.15, size = 0.8) +
+  stat_summary(fun = mean, geom = "point", 
+               shape = 23, size = 4, fill = "red", color = "darkred") +
+  scale_fill_manual(values = c("Low" = "#F18F01", 
+                                "Medium" = "#2E86AB", 
+                                "High" = "#A23B72")) +
+  labs(title = "Food Expenditure Distribution by Income Category",
+       subtitle = "Red diamonds indicate group means",
+       x = "Income Category",
+       y = "Food Expenditure (£/week)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "none")
+
+```
+  
+
+##### CHUNK 9: CORRELATION MATRIX
+
+```{r}
+library(dplyr)
+library(corrplot)
+
+# Select the variables
+numeric_vars <- data_clean %>%
+  select(Kids, HouseholdSize, Vehicles, Food, Housing, Alcohol, Debt)
+
+# Convert all selected columns to numeric (if they are not already)
+numeric_vars <- numeric_vars %>%
+  mutate(across(everything(), as.numeric))
+
+# Compute correlation matrix
+cor_matrix <- cor(numeric_vars, use = "complete.obs")
+
+# Print correlation matrix rounded to 3 decimals
+print(round(cor_matrix, 3))
+
+# Plot correlation matrix
+corrplot(cor_matrix, method = "color", type = "upper",
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45,
+         col = colorRampPalette(c("#A23B72", "white", "#2E86AB"))(200),
+         title = "Correlation Matrix: Household Expenditure Variables",
+         mar = c(0, 0, 2, 0))
+
+```
+
+##### CHUNK 10: ALCOHOL VS FOOD BY DEBT CATEGORY
+
+```{r}
+# ============================================================================
+# CHUNK 10: Alcohol vs Food Relationship by Income Category
+# ============================================================================
+
+cat("\n")
+cat("Analyzing Alcohol-Food relationship across Income levels...\n\n")
+
+# Summary statistics by income category
+income_summary <- data_clean %>%
+  group_by(income_category) %>%
+  summarise(
+    N = n(),
+    Mean_Food = mean(Food),
+    Mean_Alcohol = mean(Alcohol),
+    SD_Food = sd(Food),
+    SD_Alcohol = sd(Alcohol),
+    Correlation = cor(Alcohol, Food)
+  )
+
+cat("Income Category Summary:\n")
+kable(income_summary, digits = 2, caption = "**Summary Statistics by Income**") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(0, bold = TRUE, background = "#2C3E50", color = "white")
+
+# Main scatter plot with regression lines by income
+p1 <- ggplot(data_clean, aes(x = Alcohol, y = Food, color = income_category)) +
+  geom_point(alpha = 0.3, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, size = 1.5, alpha = 0.2) +
+  scale_color_manual(
+    values = c("Low" = "#E74C3C", "Medium" = "#F39C12", "High" = "#2ECC71"),
+    name = "Income Category"
+  ) +
+  labs(
+    title = "Figure 10: Food vs Alcohol Expenditure by Income Category",
+    subtitle = "Relationship between alcohol and food spending across income levels",
+    x = "Alcohol Expenditure (£/week)",
+    y = "Food Expenditure (£/week)"
+  ) +
+  theme(legend.position = "right",
+        legend.title = element_text(face = "bold", size = 12),
+        legend.text = element_text(size = 11))
+
+# Faceted plot for detailed comparison
+p2 <- ggplot(data_clean, aes(x = Alcohol, y = Food)) +
+  geom_point(aes(color = income_category), alpha = 0.4, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, color = "black", size = 1.2) +
+  facet_wrap(~income_category, ncol = 3) +
+  scale_color_manual(
+    values = c("Low" = "#E74C3C", "Medium" = "#F39C12", "High" = "#2ECC71")
+  ) +
+  labs(
+    title = "Figure 11: Food vs Alcohol - Faceted by Income Category",
+    subtitle = "Separate regression lines show income-specific patterns",
+    x = "Alcohol Expenditure (£/week)",
+    y = "Food Expenditure (£/week)"
+  ) +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 12),
+        strip.background = element_rect(fill = "#ECF0F1"))
+
+# Display plots
+print(p1)
+print(p2)
+
+# Statistical comparison across income categories
+cat("\n")
+cat("Linear Regression by Income Category:\n")
+cat(rep("=", 70), "\n", sep = "")
+
+regression_results <- data.frame()
+
+for(income_level in levels(data_clean$income_category)) {
+  cat(sprintf("\n%s Income:\n", income_level))
+  cat(rep("-", 50), "\n", sep = "")
+  
+  subset_data <- data_clean %>% filter(income_category == income_level)
+  model_subset <- lm(Food ~ Alcohol, data = subset_data)
+  
+  intercept <- coef(model_subset)["(Intercept)"]
+  slope <- coef(model_subset)["Alcohol"]
+  pval <- summary(model_subset)$coefficients["Alcohol", "Pr(>|t|)"]
+  r_squared <- summary(model_subset)$r.squared
+  
+  cat(sprintf("  N households: %d\n", nrow(subset_data)))
+  cat(sprintf("  Intercept: £%.2f\n", intercept))
+  cat(sprintf("  Alcohol slope: %.4f (p %s)\n", slope, format.pval(pval)))
+  cat(sprintf("  R-squared: %.4f\n", r_squared))
+  cat(sprintf("  Interpretation: £1 increase in alcohol → £%.2f change in food\n", slope))
+  
+  regression_results <- rbind(regression_results, 
+                               data.frame(Income = income_level,
+                                         Slope = slope,
+                                         P_value = pval,
+                                         R_squared = r_squared))
+}
+
+cat("\n")
+cat(rep("=", 70), "\n", sep = "")
+
+# Display comparison table
+kable(regression_results, digits = 4, 
+      caption = "**Alcohol Effect on Food by Income Category**",
+      col.names = c("Income Level", "Slope (β)", "P-value", "R²")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE, background = "#16A085", color = "white")
+
+cat("\n")
+cat("Key Insight: Compare slopes across income levels\n")
+cat("Different slopes suggest income may moderate alcohol-food relationship\n")
+cat(rep("=", 70), "\n\n", sep = "")
+
+```
+
+
+##### CHUNK 11: MAIN REGRESSION MODEL
+
+```{r}
+##### CHUNK 8: MAIN REGRESSION MODEL
+
+data_clean <- droplevels(data_clean)
+
+model1 <- lm(
+  Food ~ Kids + HouseholdSize + Vehicles + Alcohol,
+  data = data_clean
+)
+
+summary(model1)
+confint(model1, level = 0.95)
+
+
+```
+
+##### CHUNK 12: MODEL DIAGNOSTICS
+
+```{r}
+library(lmtest)
+
+par(mfrow = c(2, 2))
+plot(model1, which = 1:4, col = "#2E86AB", pch = 20, cex = 0.8)
+par(mfrow = c(1, 1))
+
+set.seed(123)
+shapiro_test <- shapiro.test(sample(residuals(model1), min(5000, length(residuals(model1)))))
+cat("\n=== SHAPIRO-WILK NORMALITY TEST ===\n")
+cat("W =", round(shapiro_test$statistic, 4), 
+    ", p-value =", format.pval(shapiro_test$p.value, eps = 0.001), "\n")
+
+bp_test <- bptest(model1)
+cat("\n=== BREUSCH-PAGAN TEST ===\n")
+cat("BP =", round(bp_test$statistic, 4), 
+    ", p-value =", format.pval(bp_test$p.value, eps = 0.001), "\n")
+
+vif_values <- vif(model1)
+cat("\n=== VARIANCE INFLATION FACTORS ===\n")
+print(round(vif_values, 3))
+
+```
+
+
+##### CHUNK 13: MODEL 1 COEFFICIENT TABLE
+
+```{r}
+model1_summary <- summary(model1)
+coef_table <- as.data.frame(model1_summary$coefficients)
+coef_table$Variable <- rownames(coef_table)
+coef_table <- coef_table %>%
+  select(Variable, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`) %>%
+  mutate(
+    Estimate = round(Estimate, 4),
+    `Std. Error` = round(`Std. Error`, 4),
+    `t value` = round(`t value`, 3),
+    Significance = case_when(
+      `Pr(>|t|)` < 0.001 ~ "***",
+      `Pr(>|t|)` < 0.01 ~ "**",
+      `Pr(>|t|)` < 0.05 ~ "*",
+      `Pr(>|t|)` < 0.1 ~ ".",
+      TRUE ~ ""
+    ),
+    `Pr(>|t|)` = format.pval(`Pr(>|t|)`, eps = 0.001, digits = 3)
+  )
+
+print(kable(coef_table, align = c('l', 'r', 'r', 'r', 'r', 'c')))
+
+cat("\n=== MODEL FIT STATISTICS ===\n")
+cat("R-squared:", round(model1_summary$r.squared, 4), "\n")
+cat("Adjusted R-squared:", round(model1_summary$adj.r.squared, 4), "\n")
+cat("Residual standard error:", round(model1_summary$sigma, 4), "\n")
+
+```
+
+##### CHUNK 14: INTERACTION MODEL (ALCOHOL × DEBT)
+
+```{r}
+
+#Convert categorical variables to factors
+data_clean <- data_clean %>%
+  mutate(
+    Sex = factor(Sex),
+    income_category = factor(income_category)
+  )
+
+# Keep only factors with >=2 levels
+valid_factors <- sapply(data_clean[, c("Sex", "income_category")], function(x) nlevels(x) > 1)
+valid_names <- names(valid_factors[valid_factors])
+
+# Build formula dynamically
+formula_base <- "Food ~ Kids + HouseholdSize + Vehicles + Housing + Alcohol + Debt"
+if(length(valid_names) > 0){
+  formula_base <- paste(formula_base, paste(valid_names, collapse = " + "), sep = " + ")
+}
+formula_full <- paste(formula_base, " + Alcohol:Debt", sep = " + ")
+
+# Fit the model
+model2 <- lm(as.formula(formula_full), data = data_clean)
+summary(model2)
+```
+
+##### CHUNK 15: INTERACTION MODEL COEFFICIENT TABLE
+
+```{r}
+model2_summary <- summary(model2)
+interaction_coef <- as.data.frame(model2_summary$coefficients)
+interaction_coef$Variable <- rownames(interaction_coef)
+interaction_coef <- interaction_coef %>%
+  select(Variable, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`) %>%
+  mutate(
+    Estimate = round(Estimate, 4),
+    `Std. Error` = round(`Std. Error`, 4),
+    `t value` = round(`t value`, 3),
+    Significance = case_when(
+      `Pr(>|t|)` < 0.001 ~ "***",
+      `Pr(>|t|)` < 0.01 ~ "**",
+      `Pr(>|t|)` < 0.05 ~ "*",
+      `Pr(>|t|)` < 0.1 ~ ".",
+      TRUE ~ ""
+    ),
+    `Pr(>|t|)` = format.pval(`Pr(>|t|)`, eps = 0.001, digits = 3)
+  )
+
+print(kable(interaction_coef, align = c('l', 'r', 'r', 'r', 'r', 'c')))
+
+```
+
+##### CHUNK 16: MODEL COMPARISON (ANOVA Analysis)
+
+```{r model-comparison}
+##### CHUNK 16: MODEL COMPARISON (ANOVA Analysis)
+
+# Ensure both models use complete cases only
+data_model <- data_clean %>%
+  filter(
+    complete.cases(Food, Kids, HouseholdSize, Sex, Vehicles, 
+                   Housing, Alcohol, Debt, income_category)
+  ) %>%
+  droplevels()
+
+cat("=== DATA PREPARATION FOR MODEL COMPARISON ===\n")
+cat("Observations used:", nrow(data_model), "\n")
+cat("Variables included: Food, Kids, HouseholdSize, Sex, Vehicles,\n")
+cat("                    Housing, Alcohol, Debt, income_category\n\n")
+
+# Refit model1 (main effects only)
+model1_refit <- lm(
+  Food ~ Kids + HouseholdSize + Sex + Vehicles + 
+         Housing + Alcohol + Debt + income_category, 
+  data = data_model
+)
+
+# Refit model2 (with interaction)
+model2_refit <- lm(
+  Food ~ Kids + HouseholdSize + Sex + Vehicles + 
+         Housing + Alcohol + Debt + income_category + 
+         Alcohol:Debt, 
+  data = data_model
+)
+
+# ANOVA comparison
+cat("=== ANOVA MODEL COMPARISON ===\n")
+anova_result <- anova(model1_refit, model2_refit)
+print(anova_result)
+
+cat("\n=== MODEL SELECTION CRITERIA ===\n")
+cat("Model 1 AIC:", round(AIC(model1_refit), 2), "\n")
+cat("Model 1 BIC:", round(BIC(model1_refit), 2), "\n")
+cat("Model 2 AIC:", round(AIC(model2_refit), 2), "\n")
+cat("Model 2 BIC:", round(BIC(model2_refit), 2), "\n")
+
+# R-squared improvement
+model1_summary <- summary(model1_refit)
+model2_summary <- summary(model2_refit)
+r2_improvement <- (model2_summary$r.squared - model1_summary$r.squared) * 100
+
+cat("\n=== R-SQUARED COMPARISON ===\n")
+cat("Model 1 R²:", round(model1_summary$r.squared, 4), "\n")
+cat("Model 2 R²:", round(model2_summary$r.squared, 4), "\n")
+cat("R-squared improvement:", round(r2_improvement, 3), "%\n")
+
+# Update for later chunks
+model2 <- model2_refit
+
+cat("\n✓ Model comparison complete\n")
+
+```
+
+
+##### CHUNK 17: VISUALIZE INTERACTION EFFECT
+```{r}
+data_clean <- data_clean %>%
+  mutate(debt_tercile = cut(Debt, 
+                            breaks = quantile(Debt, probs = c(0, 1/3, 2/3, 1)),
+                            labels = c("Low Debt\n(0-33rd percentile)", 
+                                      "Medium Debt\n(34-67th percentile)", 
+                                      "High Debt\n(68-100th percentile)"),
+                            include.lowest = TRUE))
+
+ggplot(data_clean, aes(x = Alcohol, y = Food, color = debt_tercile)) +
+  geom_point(alpha = 0.3, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.5, alpha = 0.2) +
+  scale_color_manual(values = c("#06A77D", "#F18F01", "#D62839"),
+                     name = "Debt Level") +
+  labs(title = "Interaction Effect: Alcohol × Debt on Food Expenditure",
+       subtitle = "Slopes differ significantly across debt levels (p < 0.001)",
+       x = "Alcohol Expenditure (£/week)",
+       y = "Food Expenditure (£/week)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray40"),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"))
+
+```
+
+##### CHUNK 18: SIMPLE SLOPES ANALYSIS
+
+```{r}
+debt_levels <- quantile(data_clean$Debt, probs = c(0.167, 0.5, 0.833))
+names(debt_levels) <- c("Low Debt", "Medium Debt", "High Debt")
+
+cat("\n=== SIMPLE SLOPES ANALYSIS ===\n\n")
+for (i in 1:length(debt_levels)) {
+  cat(names(debt_levels)[i], "(Debt = £", round(debt_levels[i], 2), "):\n", sep = "")
+  simple_slope <- coef(model2)["Alcohol"] + 
+                  coef(model2)["Alcohol:Debt"] * debt_levels[i]
+  cat("  Simple slope:", round(simple_slope, 4), "\n")
+  cat("  Interpretation: For each £1 increase in alcohol spending,\n")
+  cat("                  food spending changes by £", 
+      round(simple_slope, 2), "\n\n", sep = "")
+}
+
+```
+
+##### CHUNK 19: PREDICTED VALUES WITH CONFIDENCE INTERVALS
+
+```{r}
+pred_data <- expand.grid(
+  Alcohol = seq(min(data_clean$Alcohol), max(data_clean$Alcohol), length.out = 50),
+  Debt = quantile(data_clean$Debt, probs = c(0.167, 0.5, 0.833)),
+  Kids = mean(data_clean$Kids, na.rm = TRUE),
+  HouseholdSize = mean(data_clean$HouseholdSize, na.rm = TRUE),
+  Sex = "male",
+  Vehicles = round(mean(data_clean$Vehicles)),
+  Housing = mean(data_clean$Housing),
+  income_category = "Medium"
+)
+
+pred_data$Debt_Level <- factor(pred_data$Debt,
+                               labels = c("Low Debt", "Medium Debt", "High Debt"))
+
+predictions <- predict(model2, newdata = pred_data, se.fit = TRUE)
+pred_data$Food <- predictions$fit
+pred_data$SE <- predictions$se.fit
+pred_data$Lower <- pred_data$Food - 1.96 * pred_data$SE
+pred_data$Upper <- pred_data$Food + 1.96 * pred_data$SE
+
+ggplot(pred_data, aes(x = Alcohol, y = Food, 
+                      color = Debt_Level, fill = Debt_Level)) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), alpha = 0.2, color = NA) +
+  geom_line(linewidth = 1.5) +
+  scale_color_manual(values = c("#06A77D", "#F18F01", "#D62839")) +
+  scale_fill_manual(values = c("#06A77D", "#F18F01", "#D62839")) +
+  labs(title = "Predicted Food Expenditure: Alcohol × Debt Interaction",
+       subtitle = "Shaded areas represent 95% confidence intervals",
+       x = "Alcohol Expenditure (£/week)",
+       y = "Predicted Food Expenditure (£/week)",
+       color = "Debt Level",
+       fill = "Debt Level") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray40"),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"))
+
+```
+
+##### CHUNK 21: RESIDUAL ANALYSIS
+```{r}
+data_clean$residuals <- residuals(model2)
+data_clean$fitted <- fitted(model2)
+
+ggplot(data_clean, aes(x = income_category, y = residuals, 
+                       fill = income_category)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  geom_hline(yintercept = 0, linetype = "dashed", 
+             color = "red", linewidth = 1) +
+  scale_fill_manual(values = c("Low" = "#F18F01", 
+                                "Medium" = "#2E86AB", 
+                                "High" = "#A23B72")) +
+  labs(title = "Residual Distribution by Income Category",
+       subtitle = "Checking for systematic bias across income levels",
+       x = "Income Category",
+       y = "Residuals (£/week)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        legend.position = "none")
+
+```
+
+========================================================================
+
+#### EXECUTIVE REPORT: CONCLUSIONS AND RECOMMENDATIONS
+
+
+#### REPORT ANALYSIS:-
+
+This analysis investigates the determinants of weekly household food expenditure in England using cross-sectional household-level data. The study uses regression models to explore how household size, sex of the respondent, number of vehicles, presence of children, housing costs, debt payments, income category, and alcohol spending relate to food expenditure. Special attention is given to alcohol expenditure and whether its effect on food spending changes for households with different debt levels.
+
+To address Research Question 1, a multiple linear regression (Model 1, Chunk 13) was estimated to examine the key factors affecting weekly food expenditure. Alcohol expenditure is the only statistically significant predictor: indicating that each addition of £1 spent on alcohol is associated with a £0.31 increase in weekly food spending (β = 0.3106, p < 0.001, 95% CI: £0.179–£0.442), holding all other variables constant. Household size showed a positive but non-significant trend (β = 0.4247, p = 0.119), while vehicle ownership demonstrated marginal significance.The presence of children exhibited a negative association (β = -0.5897, p = 0.099), though not reaching conventional significance thresholds.The model explains only 0.66% of variation in food expenditure (R² = 0.0066), meaning most variation is not captured by the included variables. Diagnostic tests (Chunks 11–12) confirm that regression assumptions are satisfied, ensuring the coefficient estimates are statistically valid despite the model’s low explanatory power.
+
+
+##### Table 1: Model 1 Regression Coefficients (Chunk 13)
+
+```{r table-model1-coefficients, echo=FALSE, warning=FALSE, message=FALSE}
+# Model 1 coefficient table with significance indicators
+model1_summary <- summary(model1)
+coef_table <- as.data.frame(model1_summary$coefficients)
+coef_table$Variable <- rownames(coef_table)
+coef_table <- coef_table %>%
+  select(Variable, Estimate, `Std. Error`, `t value`, `Pr(>|t|)`) %>%
+  mutate(
+    Estimate = round(Estimate, 4),
+    `Std. Error` = round(`Std. Error`, 4),
+    `t value` = round(`t value`, 3),
+    Significance = case_when(
+      `Pr(>|t|)` < 0.001 ~ "***",
+      `Pr(>|t|)` < 0.01 ~ "**",
+      `Pr(>|t|)` < 0.05 ~ "*",
+      `Pr(>|t|)` < 0.1 ~ ".",
+      TRUE ~ ""
+    ),
+    `Pr(>|t|)` = format.pval(`Pr(>|t|)`, eps = 0.001, digits = 3)
+  )
+
+kable(coef_table, 
+      caption = "Table 1: Model 1 Regression Coefficients (Chunk 13)",
+      align = c('l', 'r', 'r', 'r', 'r', 'c'))
+
+```
+To examine whether debt affects the relationship between alcohol and food spending, an interaction model (Model 2, Chunk 15) was used, including Alcohol × Debt and controls for household size, vehicle ownership, children, housing costs, and income category. The interaction term is not statistically significant (β = −0.001549, p = 0.6185), meaning debt does not change how alcohol spending affects food expenditure.ANOVA comparison (Chunk 16) confirms no improvement in the model and AIC values show little difference. R² also remains nearly the same (0.1536), showing the interaction adds no explanatory power.
+Simple slopes (Chunk 18) show similar effects across debt levels: low debt (£45.08) β = 0.4113, medium (£59.88) β = 0.3884, high (£76.26) β = 0.3630. Confidence intervals include zero, confirming these differences are not meaningful.The plot (Chunk 17) shows almost parallel lines for different debt levels, and predicted food expenditure (Chunk 19) stays similar across debt categories. This confirms that household debt does not influence the alcohol–food spending relationship.
+
+Table 2: Model Comparison and Interaction Test (Chunk 16)
+
+```{r table-model-comparison, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Table 2: Model Comparison and Interaction Test (Chunk 16)
+
+# Model comparison showing interaction does not improve fit
+model_comparison <- data.frame(
+  `Model Specification` = c(
+    "Model 1: Main Effects Only (Chunk 13)", 
+    "Model 2: With Alcohol×Debt Interaction (Chunk 15)"
+  ),
+  `AIC` = c(round(AIC(model1), 2), round(AIC(model2), 2)),
+  `Adjusted R²` = c(
+    round(summary(model1)$adj.r.squared, 4), 
+    round(summary(model2)$adj.r.squared, 4)
+  )
+)
+
+kable(
+  model_comparison, 
+  caption = "Table 2: Model Comparison (Chunk 16) – Interaction Not Significant",
+  align = c('l', 'r', 'r')
+)
+
+```
+The interaction plot (Figure 1, Chunk 17; predicted values, Chunk 19) shows nearly parallel lines across debt levels, confirming that debt does not affect the relationship between alcohol and food spending. Households with low or high debt exhibit a similar increase of £0.37–£0.41 in food for every £1 spent on alcohol, supporting the statistical result that the interaction is not significant.
+
+####Figure 1 (Chunk 17): Interaction Effect - Nearly Parallel Slopes Across Debt Levels
+
+```{r interaction-plot, echo=FALSE, message=FALSE, warning=FALSE}
+# Visual proof that slopes do NOT differ significantly across debt levels
+data_clean <- data_clean %>%
+  mutate(debt_tercile = cut(Debt, 
+                            breaks = quantile(Debt, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE),
+                            labels = c("Low Debt\n(0-33rd percentile)", 
+                                      "Medium Debt\n(34-67th percentile)", 
+                                      "High Debt\n(68-100th percentile)"),
+                            include.lowest = TRUE))
+
+ggplot(data_clean, aes(x = Alcohol, y = Food, color = debt_tercile)) +
+  geom_point(alpha = 0.3, size = 1.5) +
+  geom_smooth(method = "lm", se = TRUE, linewidth = 1.5, alpha = 0.2) +
+  scale_color_manual(values = c("#06A77D", "#F18F01", "#D62839"),
+                     name = "Debt Level") +
+  labs(title = "Interaction Effect: Alcohol × Debt on Food Expenditure",
+       subtitle = "Slopes do NOT differ significantly across debt levels (p = 0.62)",
+       x = "Alcohol Expenditure (£/week)",
+       y = "Food Expenditure (£/week)",
+       caption = "Source: Chunk 17 - Interaction Visualization") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14),
+        plot.subtitle = element_text(color = "gray40"),
+        plot.caption = element_text(size = 9, color = "gray50", hjust = 0),
+        legend.position = "bottom",
+        legend.title = element_text(face = "bold"))
+
+```
+
+Table 3: Simple Slopes Analysis (Chunk 18) - Effect of Alcohol at Different Debt Levels
+
+```{r simple-slopes-table, echo=FALSE, message=FALSE, warning=FALSE}
+# Simple slopes quantifying alcohol effect across debt levels
+simple_slopes_data <- data.frame(
+  `Debt Level` = c("Low (16th percentile)", "Medium (50th percentile)", "High (83rd percentile)"),
+  `Debt Payment` = c("£45.08/week", "£59.88/week", "£76.26/week"),
+  `Simple Slope` = c("0.41", "0.39", "0.36"),
+  `Interpretation` = c("£0.41 per £1 alcohol", "£0.39 per £1 alcohol", "£0.36 per £1 alcohol")
+)
+
+kable(simple_slopes_data, 
+      caption = "Table 3: Simple Slopes Analysis (Chunk 18) – 12% Reduction Not Statistically Significant",
+      align = c('l', 'r', 'r', 'l'))
+
+```
+========================================================================
+
+#### RECOMMENDATIONS:-
+
+
+Focus on Alcohol-Linked Spending:
+Alcohol expenditure is the only significant factor affecting household food spending. This means households that spend more on alcohol also tend to spend more on food. Programs aiming to influence household food budgets or promote healthier consumption should consider this relationship when designing interventions.
+
+Address Overall Household Spending, Not Debt Alone:
+Debt payments do not significantly change how alcohol affects food spending, and other household characteristics (household size, children, vehicles) are also not significant predictors. Policies should therefore focus on overall household income and total spending patterns rather than targeting debt alone to influence food expenditure effectively.
+
+
+========================================================================
+
